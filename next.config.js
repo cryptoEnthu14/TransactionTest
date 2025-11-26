@@ -7,6 +7,8 @@ const nextConfig = {
       path: false,
       os: false,
     };
+    // Disable filesystem cache to avoid noisy PackFileCacheStrategy snapshot warnings in this setup.
+    config.cache = false;
     return config;
   },
 };

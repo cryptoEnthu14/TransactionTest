@@ -5,6 +5,8 @@ import {
   PublicKey,
   Transaction,
   SystemProgram,
+  TransactionInstruction,
+  SYSVAR_RENT_PUBKEY,
   LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
 import {
@@ -16,10 +18,43 @@ import {
   TOKEN_PROGRAM_ID,
   getAssociatedTokenAddress,
 } from '@solana/spl-token';
-import { createCreateMetadataAccountV3Instruction } from '@metaplex-foundation/mpl-token-metadata';
+import {
+  getCreateMetadataAccountV3InstructionDataSerializer,
+  type DataV2Args,
+} from '@metaplex-foundation/mpl-token-metadata';
 import bs58 from 'bs58';
 
 const TOKEN_METADATA_PROGRAM_ID = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+
+function buildCreateMetadataAccountV3Instruction(params: {
+  metadataPda: PublicKey;
+  mint: PublicKey;
+  mintAuthority: PublicKey;
+  payer: PublicKey;
+  updateAuthority: PublicKey;
+  data: DataV2Args;
+  isMutable?: boolean;
+}) {
+  const instructionData = getCreateMetadataAccountV3InstructionDataSerializer().serialize({
+    data: params.data,
+    isMutable: params.isMutable ?? true,
+    collectionDetails: null,
+  });
+
+  return new TransactionInstruction({
+    programId: TOKEN_METADATA_PROGRAM_ID,
+    keys: [
+      { pubkey: params.metadataPda, isSigner: false, isWritable: true },
+      { pubkey: params.mint, isSigner: false, isWritable: false },
+      { pubkey: params.mintAuthority, isSigner: true, isWritable: false },
+      { pubkey: params.payer, isSigner: true, isWritable: true },
+      { pubkey: params.updateAuthority, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(instructionData),
+  });
+}
 
 interface CreateTokenRequest {
   name: string;
@@ -125,6 +160,18 @@ export default async function handler(
     // Calculate minimum balance for rent exemption
     const lamports = await getMinimumBalanceForRentExemptMint(connection);
 
+    // Ensure backend wallet has enough SOL for rent and fees up-front
+    const backendBalance = await connection.getBalance(backendKeypair.publicKey);
+    const requiredLamports = lamports + Math.ceil(0.01 * LAMPORTS_PER_SOL); // ~0.01 SOL buffer for fees
+    if (backendBalance < requiredLamports) {
+      return res.status(400).json({
+        success: false,
+        error: `Backend wallet has insufficient SOL (need at least ${(requiredLamports / LAMPORTS_PER_SOL).toFixed(
+          3
+        )} SOL). Please fund the backend wallet.`,
+      });
+    }
+
     // Build transaction
     const transaction = new Transaction();
 
@@ -168,25 +215,17 @@ export default async function handler(
       creators: null,
       collection: null,
       uses: null,
-    };
+    } satisfies DataV2Args;
 
     transaction.add(
-      createCreateMetadataAccountV3Instruction(
-        {
-          metadata: metadataAddress,
-          mint: mintPublicKey,
-          mintAuthority: backendKeypair.publicKey,
-          payer: backendKeypair.publicKey,
-          updateAuthority: backendKeypair.publicKey,
-        },
-        {
-          createMetadataAccountArgsV3: {
-            data: metadataData,
-            isMutable: true,
-            collectionDetails: null,
-          },
-        }
-      )
+      buildCreateMetadataAccountV3Instruction({
+        metadataPda: metadataAddress,
+        mint: mintPublicKey,
+        mintAuthority: backendKeypair.publicKey,
+        payer: backendKeypair.publicKey,
+        updateAuthority: backendKeypair.publicKey,
+        data: metadataData,
+      })
     );
 
     let userTokenAccount: PublicKey | undefined;
